@@ -36,7 +36,7 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             python3 scripts/finish-browser-market.py
-            python3 scripts/refresh-fx.py --root market-data
+            python3 scripts/refresh-fx.py --allow-cached --root market-data
             git add market-data
             for folder in pending-market collection-results; do
               if [ -d "$folder" ] || git ls-files --error-unmatch "$folder" >/dev/null 2>&1; then

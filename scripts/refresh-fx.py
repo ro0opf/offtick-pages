@@ -84,7 +84,7 @@ def atomic_write(path, content):
             os.unlink(temporary)
 
 
-def refresh(root, fetch=fetch_rate, now=None):
+def refresh(root, fetch=fetch_rate, now=None, allow_cached=False):
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("A timezone-aware capture time is required.")
@@ -109,9 +109,41 @@ def refresh(root, fetch=fetch_rate, now=None):
         raise ValueError("Invalid exchange-rate registry.")
     rates = dict(registry["rates"])
     stamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    reused = False
+
+    def cached(day):
+        candidates = []
+        for logical in references:
+            if not FX_PATH.fullmatch(logical) or logical == "fx/index.json":
+                continue
+            value = json.loads(pending[logical]) if logical in pending else load(root, manifest, logical)
+            if value.get("reused_from"):
+                continue
+            try:
+                checked = validate_rate(value, day)
+                fetched = datetime.fromisoformat(value["fetched_at"])
+                if fetched.tzinfo is None or fetched > now or value["source_url"] != rate_url(date.fromisoformat(value["requested_date"])):
+                    raise ValueError("Invalid cached observation")
+            except (ValueError, KeyError, TypeError):
+                continue
+            candidates.append({**value, "archive_file": logical})
+        if not candidates:
+            raise ValueError("No verified, non-future exchange rate within seven days.")
+        return max(candidates, key=lambda value: (value["date"], value["fetched_at"]))
 
     def capture(day):
-        value = {**validate_rate(fetch(day), day), "fetched_at": now.astimezone(timezone.utc).isoformat()}
+        nonlocal reused
+        try:
+            value = {**validate_rate(fetch(day), day), "fetched_at": now.astimezone(timezone.utc).isoformat()}
+        except (OSError, TimeoutError):
+            if not allow_cached:
+                raise
+            original = cached(day)
+            reused = True
+            if original["requested_date"] == day.isoformat():
+                return original
+            value = {**validate_rate(original, day), "fetched_at": original["fetched_at"], "source_url": original["source_url"],
+                     "capture_method": "reused_verified_archive", "reused_from": original["archive_file"]}
         logical = f"fx/{day.isoformat()}/{stamp}-USD-KRW.json"
         store(logical, value)
         return {**value, "archive_file": logical}
@@ -133,6 +165,13 @@ def refresh(root, fetch=fetch_rate, now=None):
                 raise ValueError("Invalid saved exchange-rate path.")
             saved_value = json.loads(pending[saved]) if saved in pending else load(root, manifest, saved)
             rate = {**validate_rate(saved_value, day), "fetched_at": saved_value["fetched_at"], "archive_file": saved}
+            if saved_value.get("reused_from"):
+                if not FX_PATH.fullmatch(saved_value["reused_from"]) or saved_value["reused_from"] == "fx/index.json":
+                    raise ValueError("Invalid reused observation path.")
+                original = load(root, manifest, saved_value["reused_from"])
+                if any(saved_value[key] != original[key] for key in ("rate", "date", "fetched_at", "source_url")):
+                    raise ValueError("Reused rate differs from the verified observation.")
+                rate.update(source_url=saved_value["source_url"], capture_method="reused_verified_archive", reused_from=saved_value["reused_from"])
             if saved_value["requested_date"] != day.isoformat():
                 raise ValueError("Saved exchange-rate request mismatch.")
         else:
@@ -168,14 +207,15 @@ def refresh(root, fetch=fetch_rate, now=None):
         atomic_write(root / filename, content)
     atomic_write(root / "index.json", encoded({**manifest, "files": references}))
     return {"rate": latest["rate"], "reference_date": latest["date"], "fetched_at": latest["fetched_at"],
-            "us_days": len(listing["items"]), "converted_rows": converted}
+            "us_days": len(listing["items"]), "converted_rows": converted, "reused_cached": reused}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1] / "apps/web/public/market-data")
+    parser.add_argument("--allow-cached", action="store_true", help="On network failure reuse verified archived rates, retaining the original observation time")
     args = parser.parse_args()
-    print(json.dumps(refresh(args.root), ensure_ascii=False))
+    print(json.dumps(refresh(args.root, allow_cached=args.allow_cached), ensure_ascii=False))
 
 
 if __name__ == "__main__":
