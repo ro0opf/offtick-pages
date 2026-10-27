@@ -26,17 +26,28 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
-      - name: Store exchange rates and calculate turnover
-        run: python3 scripts/refresh-fx.py --root market-data
-      - name: Commit public exchange-rate observations
+        with:
+          ref: main
+      - name: Verify browser collections, store rates and publish data
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add market-data
-          if ! git diff --cached --quiet; then
-            git commit -m 'data: 환율 관측과 미국 거래대금 갱신'
-            git push origin HEAD:main
-          fi
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+            python3 scripts/finish-browser-market.py
+            python3 scripts/refresh-fx.py --root market-data
+            git add market-data
+            for folder in pending-market collection-results; do
+              if [ -d "$folder" ] || git ls-files --error-unmatch "$folder" >/dev/null 2>&1; then
+                git add -A -- "$folder"
+              fi
+            done
+            if git diff --cached --quiet; then break; fi
+            git commit -m 'data: 브라우저 수집 검증과 환율 보관'
+            if git push origin HEAD:main; then break; fi
+            if [ "$attempt" = 3 ]; then exit 1; fi
+          done
       - uses: actions/configure-pages@v5
       - name: Prepare public site files
         run: |
@@ -44,6 +55,7 @@ jobs:
           cp index.html _site/
           cp -R assets market-data _site/
           if [ -d private-journal ]; then cp -R private-journal _site/; fi
+          if [ -d collection-results ]; then cp -R collection-results _site/; fi
           touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v4
         with:
