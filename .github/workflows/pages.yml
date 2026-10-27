@@ -1,0 +1,52 @@
+name: Refresh exchange rates and deploy Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # 06:17 and 18:17 Asia/Seoul. GitHub schedules may start later under load.
+    - cron: "17 21,9 * * *"
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: public-market-pages
+  cancel-in-progress: false
+
+jobs:
+  refresh-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Store exchange rates and calculate turnover
+        run: python3 scripts/refresh-fx.py --root market-data
+      - name: Commit public exchange-rate observations
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add market-data
+          if ! git diff --cached --quiet; then
+            git commit -m 'data: 환율 관측과 미국 거래대금 갱신'
+            git push origin HEAD:main
+          fi
+      - uses: actions/configure-pages@v5
+      - name: Prepare public site files
+        run: |
+          mkdir _site
+          cp index.html _site/
+          cp -R assets market-data _site/
+          touch _site/.nojekyll
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
