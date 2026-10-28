@@ -54,7 +54,6 @@ jobs:
           mkdir _site
           cp index.html _site/
           cp -R assets market-data _site/
-          if [ -d private-journal ]; then cp -R private-journal _site/; fi
           if [ -d collection-results ]; then cp -R collection-results _site/; fi
           touch _site/.nojekyll
       - uses: actions/upload-pages-artifact@v4
