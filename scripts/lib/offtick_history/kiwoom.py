@@ -20,6 +20,7 @@ AUTH_CODES = {8005, 8031, 8103}
 ROWS_KEY = "acnt_ord_cntr_prst_array"
 READ_PATHS = {
     ACCOUNT_API_ID: API_PATH, API_ID: API_PATH,
+    "kt00018": API_PATH,  # 계좌 전체의 추정예탁자산·평가금액
     "ka10032": "/api/dostk/rkinfo",  # 통합 거래대금 순위
     "ka10099": "/api/dostk/stkinfo",  # 종목 유형 확인
     "ka10080": "/api/dostk/chart",   # 종목 1분봉
