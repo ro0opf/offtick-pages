@@ -41,8 +41,10 @@ def normalize_execution(row: dict, day: date, alias: str, source: dict, mode: st
     order_id = identifier(row.get("ord_no"), "order_id")
     execution_number = identifier(row.get("cntr_no"), "execution_id")
     raw_symbol = str(row.get("stk_cd") or "").strip()
-    prefix = raw_symbol[:1] if re.fullmatch(r"[AJQ][A-Z0-9]{6}", raw_symbol) else None
-    symbol = raw_symbol[1:] if prefix else raw_symbol
+    # Live kt00009 can annotate the documented A/J/Q prefix with '*'.
+    provider_symbol = raw_symbol[1:] if re.fullmatch(r"\*[AJQ][A-Z0-9]{6}", raw_symbol) else raw_symbol
+    prefix = provider_symbol[:1] if re.fullmatch(r"[AJQ][A-Z0-9]{6}", provider_symbol) else None
+    symbol = provider_symbol[1:] if prefix else provider_symbol
     if not re.fullmatch(r"[A-Z0-9]{6}", symbol):
         raise InvalidExecution("missing_or_invalid_symbol")
     description = str(row.get("io_tp_nm") or "").strip()
@@ -84,7 +86,10 @@ def normalize_execution(row: dict, day: date, alias: str, source: dict, mode: st
 
 
 def economic_record(record: dict) -> dict:
-    return {k: v for k, v in record.items() if k != "sources"}
+    value = {k: v for k, v in record.items() if k != "sources"}
+    if re.fullmatch(r"\*[AJQ][A-Z0-9]{6}", str(value.get("broker_symbol", ""))):
+        value["broker_symbol"] = value["broker_symbol"][1:]
+    return value
 
 
 def merge_execution(records: dict[str, dict], record: dict) -> bool:
