@@ -135,7 +135,7 @@ def stock_daily(run, item):
 
 
 def yahoo_fetch(ticker, start, end):
-    query = parse.urlencode({"interval": "1d", "period1": int(start.timestamp()), "period2": int(end.timestamp())})
+    query = parse.urlencode({"interval": "1d", "includePrePost": "false", "period1": int(start.timestamp()), "period2": int(end.timestamp())})
     url = "https://query1.finance.yahoo.com/v8/finance/chart/" + parse.quote(ticker, safe="") + "?" + query
     req = request.Request(url, headers={"User-Agent": "offtick/1.0 personal-market-journal", "Accept": "application/json"})
     try:
@@ -143,6 +143,52 @@ def yahoo_fetch(ticker, start, end):
             return response.read(), url
     except (error.URLError, OSError, TimeoutError):
         raise HistoryError("공개 지수 일별 자료를 조회하지 못했습니다.") from None
+
+
+def public_stock_daily(run, item, fetch=yahoo_fetch):
+    """Confirm the whole daily bar; never combine an overnight quote with session OHLC."""
+    # Kiwoom preserves Berkshire class suffixes; Yahoo uses a hyphenated class symbol.
+    ticker = {"BRKa": "BRK-A", "BRKb": "BRK-B"}.get(item["symbol"], item["symbol"])
+    start = datetime.combine(run.day - timedelta(days=14), time(), NEW_YORK)
+    end = datetime.combine(run.day + timedelta(days=1), time(), NEW_YORK)
+    content, url = fetch(ticker, start, end)
+    result = json.loads(content, parse_float=Decimal)["chart"]["result"][0]
+    meta = result["meta"]
+    if (meta.get("symbol") != ticker or meta.get("exchangeTimezoneName") != "America/New_York"
+            or meta.get("currency") != "USD" or meta.get("dataGranularity") != "1d"):
+        raise HistoryError("공개 종목 일봉의 종목·통화·시간대·주기를 확인하세요.")
+    quotes, history, seen = result["indicators"]["quote"][0], {}, set()
+    for i, stamp in enumerate(result["timestamp"]):
+        day = datetime.fromtimestamp(stamp, NEW_YORK).date()
+        if day > run.day:
+            continue
+        if day in seen or not session(day):
+            raise HistoryError("공개 종목 일봉의 날짜가 중복되거나 거래일이 아닙니다.")
+        seen.add(day)
+        if any(quotes[field][i] is None for field in ("open", "high", "low", "close", "volume")):
+            continue
+        values = {field: format(Decimal(number(quotes[field][i], positive=True)).quantize(Decimal("0.0001")), "f")
+                  for field in ("open", "high", "low", "close")}
+        if not (0 < Decimal(values["low"]) <= min(Decimal(values["open"]), Decimal(values["close"]))
+                <= max(Decimal(values["open"]), Decimal(values["close"])) <= Decimal(values["high"])):
+            raise HistoryError("공개 종목 일봉의 가격 범위가 올바르지 않습니다.")
+        volume = number(quotes["volume"][i])
+        if Decimal(volume) < 0 or Decimal(volume) != Decimal(volume).to_integral_value():
+            raise HistoryError("공개 종목 일봉의 거래량을 확인하세요.")
+        history[day] = {**values, "volume": volume}
+    if run.day not in history or date.fromisoformat(previous_session(run.day)["trade_date"]) not in history:
+        raise HistoryError("공개 종목 일봉의 요청일 또는 직전 거래일 자료가 없습니다.")
+    target = history[run.day]
+    prior = history[date.fromisoformat(previous_session(run.day)["trade_date"])]
+    with localcontext() as context:
+        context.prec = 64
+        change = format(((Decimal(target["close"]) / Decimal(prior["close"]) - 1) * 100).quantize(Decimal("0.0001")), "f")
+    path = run.path / "raw/daily-confirmation" / (ticker + ".json")
+    write_market_bytes(path, content)
+    return {**target, "previous_close": prior["close"], "change_pct": change,
+            "price_provider": "Yahoo Finance public chart", "price_basis": "regular_session_daily",
+            "source": {"file": str(path.relative_to(run.path)), "sha256": hashlib.sha256(content).hexdigest()},
+            "provider_url": url}
 
 
 def index_daily(run, code, fetch=yahoo_fetch):

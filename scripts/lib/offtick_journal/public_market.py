@@ -22,7 +22,7 @@ SELECTION_FIELDS = ("status", "policy", "observed_at", "market_scope", "provider
                     "security_classification_as_of", "historical_security_eligibility_verified", "turnover_amount_available", "caveats")
 US_FIELDS = ("kind", "symbol", "exchange", "name", "rank", "trade_date", "currency", "open", "high", "low", "close",
              "previous_close", "change_pct", "volume", "ma20", "ma60", "turnover_usd", "turnover_unit_status", "latest_attempt_failed",
-             "turnover_display_usd", "turnover_krw", "turnover_basis", "turnover_is_estimate")
+             "turnover_display_usd", "turnover_krw", "turnover_basis", "turnover_is_estimate", "price_provider", "price_basis")
 BAR_FIELDS = ("at", "open", "high", "low", "close", "volume")
 
 

@@ -49,7 +49,7 @@ class UsMarket:
                         and snapshot.get("collection_status") == "complete"
                         and not any(row.get("latest_attempt_failed") for row in records))
             fields = ("kind", "symbol", "exchange", "name", "trade_date", "currency", "open", "high", "low", "close",
-                      "previous_close", "change_pct", "volume", "ma20", "ma60", "turnover_usd", "turnover_unit_status", "latest_attempt_failed")
+                      "previous_close", "change_pct", "volume", "ma20", "ma60", "turnover_usd", "turnover_unit_status", "latest_attempt_failed", "price_provider", "price_basis")
             public = [{**{key: row[key] for key in fields if key in row},
                        **({"rank": members[(row["exchange"], row["symbol"])]["rank"],
                            **turnover_value(row, empty["exchange_rate"])} if row["kind"] == "stock" else {})} for row in records]

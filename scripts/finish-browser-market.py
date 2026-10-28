@@ -17,7 +17,7 @@ sys.path[:0] = [str(ROOT / "packages/trade-history/src"), str(ROOT / "apps/api/s
 from offtick_history.common import json_text, number, product, write_json
 from offtick_history.market_storage import read_market_bytes
 from offtick_history.us_calendar import latest_completed, NEW_YORK
-from offtick_history.us_market import index_daily
+from offtick_history.us_market import index_daily, public_stock_daily
 from offtick_journal.public_market import export_market, SELECTION_FIELDS
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -45,8 +45,11 @@ def reference(root, run, component, value):
 def validate_batch(value, now):
     if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("market") not in {"kr", "us"}:
         raise ValueError("Invalid batch")
-    if set(value) - {"schema_version", "market", "trade_date", "observed_at", "items", "series", "selection", "rank_source"}:
+    if set(value) - {"schema_version", "market", "trade_date", "observed_at", "items", "series", "selection", "rank_source", "daily_confirmation"}:
         raise ValueError("Unexpected batch fields")
+    confirmation = value.get("daily_confirmation")
+    if confirmation is not None and (value["market"] != "us" or confirmation != "yahoo_regular_session_v1"):
+        raise ValueError("Invalid daily confirmation source")
     day = date.fromisoformat(value["trade_date"])
     observed = datetime.fromisoformat(value["observed_at"].replace("Z", "+00:00"))
     if observed.tzinfo is None or observed > now + timedelta(minutes=5) or now - observed > timedelta(days=7):
@@ -64,7 +67,13 @@ def validate_batch(value, now):
                 raise ValueError("Invalid US identity")
             if item.get("trade_date") != day.isoformat() or item.get("currency") != "USD" or item.get("kind") != "stock":
                 raise ValueError("Invalid US quote scope")
-            price_check(item)
+            if confirmation:
+                # This is a provider snapshot, not a publishable bar. All prices are replaced and
+                # checked against a dated regular-session daily source in stage_us, atomically.
+                for field in ("open", "high", "low", "close"):
+                    number(item[field], positive=True)
+            else:
+                price_check(item)
             for field in ("volume", "turnover_raw"):
                 if Decimal(number(item[field])) < 0:
                     raise ValueError("Negative amount")
@@ -90,13 +99,27 @@ def run_id(value):
     return observed.strftime("%Y%m%dT%H%M%SZ-") + hashlib.sha256(json_text(value).encode()).hexdigest()[:8]
 
 
-def stage_us(value, day, root, fetch_index):
+def stage_us(value, day, root, fetch_index, fetch_stock):
     run = run_id(value)
     market = root / "market"
     scope = {"market": "US", "data_mode": "live", "trade_date": day.isoformat()}
     fields = ("kind", "symbol", "exchange", "name", "trade_date", "currency", "open", "high", "low", "close", "previous_close", "change_pct", "volume", "turnover_usd", "turnover_raw", "turnover_reported_unit", "turnover_unit_status")
     stocks = [{**scope, **pick(item, fields)} for item in value["items"]]
     request = SimpleNamespace(day=day, id=run, path=root / "indices-source")
+    if value.get("daily_confirmation"):
+        for stock in stocks:
+            stock.update(fetch_stock(request, stock))
+            price_check(stock)
+            volume = Decimal(number(stock["volume"]))
+            if volume < 0 or volume != volume.to_integral_value():
+                raise ValueError("Invalid confirmed volume")
+            number(stock["previous_close"], positive=True)
+            number(stock["change_pct"])
+            documented = Decimal(product(stock["turnover_raw"], "1000"))
+            low, high = (Decimal(product(stock[key], stock["volume"])) for key in ("low", "high"))
+            consistent = low <= documented <= high
+            stock["turnover_usd"] = format(documented, "f") if consistent else None
+            stock["turnover_unit_status"] = "documented_unit_consistent_with_price_volume" if consistent else "documentation_response_inconsistent"
     indices = [fetch_index(request, code) for code in ("IXIC", "DJI")]
     selection = {**scope, "items": [pick(item, ("symbol", "exchange", "name", "rank", "provider_rank")) for item in value["items"]],
                  "observed_at": value["observed_at"], "rank_source": value["rank_source"], "rank_date_explicit_in_response": False}
@@ -185,7 +208,7 @@ def merge_archive(source, target):
     write_json(target / "index.json", saved)
 
 
-def finish(root, *, now=None, fetch_index=index_daily):
+def finish(root, *, now=None, fetch_index=index_daily, fetch_stock=public_stock_daily):
     now = now or datetime.now(timezone.utc)
     for path in sorted((root / "pending-market").glob("*.json.gz")):
         identity = path.name.removesuffix(".json.gz")
@@ -207,7 +230,7 @@ def finish(root, *, now=None, fetch_index=index_daily):
             with tempfile.TemporaryDirectory(prefix=".offtick-browser-", dir=root) as temp:
                 stage = Path(temp)
                 if value["market"] == "us":
-                    stage_us(value, day, stage / "us", fetch_index)
+                    stage_us(value, day, stage / "us", fetch_index, fetch_stock)
                 else:
                     stage_kr(value, day, stage / "kr", root / "market-data")
                 export_market(stage / "kr/market", stage / "us", stage / "public")
