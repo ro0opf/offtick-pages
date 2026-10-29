@@ -145,7 +145,37 @@ def yahoo_fetch(ticker, start, end):
         raise HistoryError("공개 지수 일별 자료를 조회하지 못했습니다.") from None
 
 
-def public_stock_daily(run, item, fetch=yahoo_fetch):
+def closing_quote(meta, day, row, now):
+    """Use a closing quote only when its entire session agrees with the daily row."""
+    market = session(day)
+    regular = meta.get("currentTradingPeriod", {}).get("regular", {})
+    stamp = meta.get("regularMarketTime")
+    if (not market or now < market["close"] + timedelta(minutes=20)
+            or type(stamp) is not int
+            or regular.get("start") != int(market["open"].timestamp())
+            or regular.get("end") != int(market["close"].timestamp())):
+        raise HistoryError("공개 종목의 정규장 마감 시각을 확인하지 못했습니다.")
+    quoted = datetime.fromtimestamp(stamp, NEW_YORK)
+    # Bound the observed reporting delay of provider-labelled regular closing quotes.
+    # Never read postMarketPrice or a quote from another trading period.
+    if not market["close"] - timedelta(minutes=1) <= quoted <= market["close"] + timedelta(minutes=5):
+        raise HistoryError("공개 종목의 마감 가격이 요청 거래일의 마감 시각과 다릅니다.")
+    # Chart OHLC uses float32 while quote metadata can be rounded to 0.001 USD.
+    # Compare their representation bounds; rounding both at a tick boundary can disagree.
+    for field, key in (("high", "regularMarketDayHigh"), ("low", "regularMarketDayLow")):
+        reported = Decimal(number(meta.get(key), positive=True))
+        tolerance = max(Decimal("0.0005"), abs(reported) / Decimal(2 ** 24))
+        if abs(Decimal(number(row[field], positive=True)) - reported) > tolerance:
+            raise HistoryError("공개 종목의 마감 가격과 일봉 범위가 일치하지 않습니다.")
+    if Decimal(number(row["volume"])) != Decimal(number(meta.get("regularMarketVolume"))):
+        raise HistoryError("공개 종목의 마감 가격과 일봉 거래량이 일치하지 않습니다.")
+    price = number(meta.get("regularMarketPrice"), positive=True)
+    if not Decimal(number(row["low"])) <= Decimal(price) <= Decimal(number(row["high"])):
+        raise HistoryError("공개 종목의 정규장 마감 가격이 일봉 범위를 벗어났습니다.")
+    return price
+
+
+def public_stock_daily(run, item, fetch=yahoo_fetch, *, now=None):
     """Confirm the whole daily bar; never combine an overnight quote with session OHLC."""
     # Kiwoom preserves Berkshire class suffixes; Yahoo uses a hyphenated class symbol.
     ticker = {"BRKa": "BRK-A", "BRKb": "BRK-B"}.get(item["symbol"], item["symbol"])
@@ -158,6 +188,7 @@ def public_stock_daily(run, item, fetch=yahoo_fetch):
             or meta.get("currency") != "USD" or meta.get("dataGranularity") != "1d"):
         raise HistoryError("공개 종목 일봉의 종목·통화·시간대·주기를 확인하세요.")
     quotes, history, seen = result["indicators"]["quote"][0], {}, set()
+    used_closing_quote = False
     for i, stamp in enumerate(result["timestamp"]):
         day = datetime.fromtimestamp(stamp, NEW_YORK).date()
         if day > run.day:
@@ -165,14 +196,18 @@ def public_stock_daily(run, item, fetch=yahoo_fetch):
         if day in seen or not session(day):
             raise HistoryError("공개 종목 일봉의 날짜가 중복되거나 거래일이 아닙니다.")
         seen.add(day)
-        if any(quotes[field][i] is None for field in ("open", "high", "low", "close", "volume")):
+        row = {field: quotes[field][i] for field in ("open", "high", "low", "close", "volume")}
+        if day == run.day and row["close"] is None and all(row[field] is not None for field in ("open", "high", "low", "volume")):
+            row["close"] = closing_quote(meta, day, row, now or getattr(run, "observed_at", datetime.now(SEOUL)))
+            used_closing_quote = True
+        if any(row[field] is None for field in row):
             continue
-        values = {field: format(Decimal(number(quotes[field][i], positive=True)).quantize(Decimal("0.0001")), "f")
+        values = {field: format(Decimal(number(row[field], positive=True)).quantize(Decimal("0.0001")), "f")
                   for field in ("open", "high", "low", "close")}
         if not (0 < Decimal(values["low"]) <= min(Decimal(values["open"]), Decimal(values["close"]))
                 <= max(Decimal(values["open"]), Decimal(values["close"])) <= Decimal(values["high"])):
             raise HistoryError("공개 종목 일봉의 가격 범위가 올바르지 않습니다.")
-        volume = number(quotes["volume"][i])
+        volume = number(row["volume"])
         if Decimal(volume) < 0 or Decimal(volume) != Decimal(volume).to_integral_value():
             raise HistoryError("공개 종목 일봉의 거래량을 확인하세요.")
         history[day] = {**values, "volume": volume}
@@ -186,7 +221,7 @@ def public_stock_daily(run, item, fetch=yahoo_fetch):
     path = run.path / "raw/daily-confirmation" / (ticker + ".json")
     write_market_bytes(path, content)
     return {**target, "previous_close": prior["close"], "change_pct": change,
-            "price_provider": "Yahoo Finance public chart", "price_basis": "regular_session_daily",
+            "price_provider": "Yahoo Finance public chart", "price_basis": "regular_session_daily_closing_quote" if used_closing_quote else "regular_session_daily",
             "source": {"file": str(path.relative_to(run.path)), "sha256": hashlib.sha256(content).hexdigest()},
             "provider_url": url}
 

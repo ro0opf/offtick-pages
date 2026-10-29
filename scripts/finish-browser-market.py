@@ -24,6 +24,11 @@ MAX_BYTES = 64 * 1024 * 1024
 REQUEST = re.compile(r"(kr|us)-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
 
 
+class CollectionFailure(Exception):
+    def __init__(self, code, symbol):
+        self.code, self.symbol = code, symbol
+
+
 def pick(value, fields):
     return {key: value[key] for key in fields if key in value}
 
@@ -105,22 +110,30 @@ def stage_us(value, day, root, fetch_index, fetch_stock):
     scope = {"market": "US", "data_mode": "live", "trade_date": day.isoformat()}
     fields = ("kind", "symbol", "exchange", "name", "trade_date", "currency", "open", "high", "low", "close", "previous_close", "change_pct", "volume", "turnover_usd", "turnover_raw", "turnover_reported_unit", "turnover_unit_status")
     stocks = [{**scope, **pick(item, fields)} for item in value["items"]]
-    request = SimpleNamespace(day=day, id=run, path=root / "indices-source")
+    request = SimpleNamespace(day=day, id=run, path=root / "indices-source", observed_at=datetime.fromisoformat(value["observed_at"].replace("Z", "+00:00")))
     if value.get("daily_confirmation"):
         for stock in stocks:
-            stock.update(fetch_stock(request, stock))
-            price_check(stock)
-            volume = Decimal(number(stock["volume"]))
-            if volume < 0 or volume != volume.to_integral_value():
-                raise ValueError("Invalid confirmed volume")
-            number(stock["previous_close"], positive=True)
-            number(stock["change_pct"])
+            try:
+                stock.update(fetch_stock(request, stock))
+                price_check(stock)
+                volume = Decimal(number(stock["volume"]))
+                if volume < 0 or volume != volume.to_integral_value():
+                    raise ValueError("Invalid confirmed volume")
+                number(stock["previous_close"], positive=True)
+                number(stock["change_pct"])
+            except Exception as error:
+                raise CollectionFailure("stock_daily_unavailable", stock["symbol"]) from error
             documented = Decimal(product(stock["turnover_raw"], "1000"))
             low, high = (Decimal(product(stock[key], stock["volume"])) for key in ("low", "high"))
             consistent = low <= documented <= high
             stock["turnover_usd"] = format(documented, "f") if consistent else None
             stock["turnover_unit_status"] = "documented_unit_consistent_with_price_volume" if consistent else "documentation_response_inconsistent"
-    indices = [fetch_index(request, code) for code in ("IXIC", "DJI")]
+    indices = []
+    for code in ("IXIC", "DJI"):
+        try:
+            indices.append(fetch_index(request, code))
+        except Exception as error:
+            raise CollectionFailure("index_daily_unavailable", code) from error
     selection = {**scope, "items": [pick(item, ("symbol", "exchange", "name", "rank", "provider_rank")) for item in value["items"]],
                  "observed_at": value["observed_at"], "rank_source": value["rank_source"], "rank_date_explicit_in_response": False}
     daily = {**scope, "records": [*indices, *stocks], "collection_status": "complete", "observed_at": value["observed_at"],
@@ -243,12 +256,16 @@ def finish(root, *, now=None, fetch_index=index_daily, fetch_stock=public_stock_
                     os.replace(stage / "previous", root / "market-data")
                     raise
             receipt.update(state="succeeded", message="시세 검증과 Git 저장 완료")
+        except CollectionFailure as error:
+            label = "종목 마감 일봉" if error.code == "stock_daily_unavailable" else "미국 지수 일봉"
+            receipt.update(error_code=error.code, symbol=error.symbol,
+                message=f"{error.symbol}의 {receipt['trade_date']} {label}을 확인하지 못했습니다. 이전 자료와 수집 결과는 유지됩니다. 잠시 후 업로드를 재시도해 주세요.")
         except Exception:
             # Never include provider messages, arbitrary input or local paths in public receipts.
-            receipt["message"] = "자료 검증 또는 미국 지수 보완에 실패했습니다. 이전 자료는 유지됩니다. 보관된 수집 결과의 업로드를 재시도해 주세요."
+            receipt.update(error_code="collection_validation_failed", message="수집 자료 검증에 실패했습니다. 이전 자료와 수집 결과는 유지됩니다. 업로드를 재시도해 주세요.")
         write_json(root / "collection-results" / (identity + ".json"), receipt)
         path.unlink()
-        print(identity + ": " + receipt["state"], flush=True)
+        print(identity + ": " + receipt["state"] + (" · " + receipt["error_code"] if "error_code" in receipt else ""), flush=True)
 
 
 if __name__ == "__main__":
