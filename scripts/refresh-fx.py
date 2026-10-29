@@ -97,8 +97,18 @@ def refresh(root, fetch=fetch_rate, now=None, allow_cached=False):
 
     def store(logical, value, compressed=False):
         plain = encoded(value)
-        content = gzip.compress(plain, mtime=0) if compressed else plain
         filename = logical + ".gz" if compressed else logical
+        previous = references.get(logical)
+        if (previous and previous["file"] == filename and previous["content_sha256"] == hashlib.sha256(plain).hexdigest()
+                and previous["uncompressed_bytes"] == len(plain)):
+            existing = (root / filename).read_bytes()
+            if len(existing) != previous["bytes"] or hashlib.sha256(existing).hexdigest() != previous["sha256"]:
+                raise ValueError("Archive checksum mismatch: " + logical)
+            restored = gzip.decompress(existing) if compressed else existing
+            if restored != plain:
+                raise ValueError("Archive content mismatch: " + logical)
+            return
+        content = gzip.compress(plain, mtime=0) if compressed else plain
         pending[filename] = content
         references[logical] = {"file": filename, "encoding": "gzip" if compressed else "json", "format": "json",
                                "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content),
